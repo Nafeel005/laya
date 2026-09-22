@@ -170,7 +170,14 @@ class DecisionModel(nn.Module):
             top1 = p.topk(1, -1).values
             top2 = torch.cat([top1, torch.zeros_like(top1)], dim=-1)
         feats = torch.stack([top2[:, 0], top2[:, 0] - top2[:, 1], ent, k / 255.0], -1)
-        pooled = h[:, 0].float()
+        # The head layers are pre-norm with no final norm, so the residual stream leaves
+        # the head ~300x the encoder's scale. `scorer` starts with its own LayerNorm and
+        # is unaffected, but `pooled` feeds `act_head` directly and saturates it, pinning
+        # act_probability at 1.0 for every input (#185). Normalize the pooled vector with
+        # a parameter-free LayerNorm: no new weights, so published checkpoints still load
+        # with strict=True and the option logits are bit-identical. The act outputs become
+        # input-responsive again (still uncalibrated — fit a temperature as with options).
+        pooled = nn.functional.layer_norm(h[:, 0].float(), (h.size(-1),))
         act_logits = self.act_head(torch.cat([pooled, feats], -1))
         return logits, act_logits
 

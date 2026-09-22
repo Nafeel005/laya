@@ -93,9 +93,57 @@ def test_multi_option_question_is_unaffected():
     assert torch.isfinite(act_logits).all()
 
 
+def test_act_head_receives_normalized_pooled_input():
+    # Regression test for #185: the pre-norm head leaves the residual stream ~300x the
+    # encoder's scale, which saturated act_head and pinned act_probability at 1.0.
+    # forward() must normalize the pooled vector (parameter-free, so checkpoints
+    # still load) before act_head. Capture act_head's input and check the pooled
+    # part is zero-mean / unit-variance per row.
+    torch.manual_seed(3)
+    model = _tiny_model()
+    d = model.encoder.config.hidden_size
+    captured = {}
+
+    def hook(mod, inputs, output):
+        captured["x"] = inputs[0].detach()
+
+    handle = model.act_head[0].register_forward_hook(hook)
+    try:
+        input_ids, attention_mask, marker_pos, marker_mask, qtype = _inputs(
+            batch=2, seq=10, n_markers=3
+        )
+        with torch.no_grad():
+            logits, act_logits = model(input_ids, attention_mask, marker_pos, marker_mask, qtype)
+    finally:
+        handle.remove()
+    assert torch.isfinite(logits).all()
+    assert torch.isfinite(act_logits).all()
+    x = captured["x"]
+    assert x.shape == (2, d + 4)
+    pooled_part = x[:, :d]
+    row_mean = pooled_part.mean(-1)
+    row_var = pooled_part.var(-1, unbiased=False)
+    assert torch.allclose(row_mean, torch.zeros_like(row_mean), atol=1e-5)
+    assert torch.allclose(row_var, torch.ones_like(row_var), atol=1e-5)
+
+
+def test_act_fix_adds_no_parameters():
+    # The #185 fix must stay checkpoint-compatible: no new norm weights, so a
+    # published checkpoint still loads with strict=True and the scorer path
+    # (option logits) is untouched.
+    model = _tiny_model()
+    keys = set(model.state_dict().keys())
+    assert {k for k in keys if k.startswith("act_head.")} == {
+        "act_head.0.weight", "act_head.0.bias",
+        "act_head.2.weight", "act_head.2.bias",
+    }
+
+
 if __name__ == "__main__":
     test_single_option_question_does_not_crash()
     test_single_option_top1_minus_top2_is_exactly_one()
     test_multi_option_question_is_unaffected()
+    test_act_head_receives_normalized_pooled_input()
+    test_act_fix_adds_no_parameters()
     print("all decision model tests passed")
 

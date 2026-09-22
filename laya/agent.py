@@ -864,6 +864,9 @@ class Agent(HookRegistry):
 
         Returns:
             Dictionary with answers, probabilities, calibrated confidence, and token usage.
+            Each answer also carries `action.act_probability` from the act head: it now
+            responds to the input (the pooled vector is normalized before the head, see
+            #185) but ships uncalibrated, so fit a temperature before gating on it.
             Empty questions return empty answers and zero token usage without tokenization
             or a model forward pass.
 
